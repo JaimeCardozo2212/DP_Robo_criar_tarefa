@@ -23,6 +23,7 @@ load_dotenv()
 # Obtém email e senha das variáveis de ambiente
 email = os.getenv("EMAIL")
 senha = os.getenv("SENHA")
+url = os.getenv("URL_ENTRADA")
 
 # Configuração dos tipos de admissão (empregados e estagiários)
 TIPOS = [
@@ -357,7 +358,7 @@ def fazer_login(driver):
     Realiza login no sistema Onvio usando email e senha do arquivo .env
     """
     # Acessa página de logout primeiro para garantir estado limpo
-    driver.get("https://onvio.com.br/login/#/logout")
+    driver.get(url)
 
     time.sleep(2)
 

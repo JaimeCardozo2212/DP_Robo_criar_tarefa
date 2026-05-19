@@ -21,6 +21,7 @@ load_dotenv()
 
 email = os.getenv("EMAIL")
 senha = os.getenv("SENHA")
+url = os.getenv("URL_ENTRADA")
 
 TIPOS = [
 #     {
@@ -283,7 +284,7 @@ def iniciar_driver():
 
 
 def fazer_login(driver):
-    driver.get("https://onvio.com.br/login/#/logout")
+    driver.get(url)
 
     time.sleep(2)
 

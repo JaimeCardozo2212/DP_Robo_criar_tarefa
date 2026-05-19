@@ -26,6 +26,7 @@ load_dotenv()
 # Obtém credenciais de acesso
 email = os.getenv("EMAIL")  # Email para login no Onvio
 senha = os.getenv("SENHA")  # Senha para login no Onvio
+url = os.getenv("URL_ENTRADA")
 
 # Configuração do tipo de processamento (cálculo de rescisão)
 TIPOS = [
@@ -439,7 +440,7 @@ def fazer_login(driver):
     """
     Realiza login no sistema Onvio.
     """
-    driver.get("https://onvio.com.br/login/#/logout")  # Logout primeiro
+    driver.get(url) # Logout primeiro
     time.sleep(2)
     clicar(driver, '//*[@id="trauth-continue-signout-btn"]')
     time.sleep(2)
