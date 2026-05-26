@@ -33,7 +33,8 @@ TIPOS = [
         "grid_id": "gridPayrollRegistrationEmployeeList",  # ID da tabela no site
         "aba_estagiario": False,  # Não é estagiário
         "titulo_tarefa": "DP - ADMISSÃO EMPREGADO(A)",  # Título da tarefa no sistema
-        "xpath_expandir": '//*[@id="items-per-page-0"]'  # XPATH para expandir lista
+        "xpath_expandir": '//*[@id="items-per-page-0"]',  # XPATH para expandir lista
+        "id_minimo": 2310
     },
     {
         "nome": "estagiario",
@@ -41,7 +42,8 @@ TIPOS = [
         "grid_id": "gridPayrollEntriesInternList",
         "aba_estagiario": True,  # É estagiário
         "titulo_tarefa": "DP - ADMISSÃO EMPREGADO(A)",
-        "xpath_expandir": '//*[@id="items-per-page-1"]'
+        "xpath_expandir": '//*[@id="items-per-page-1"]',
+        "id_minimo": 2240
     }
 ]
 
@@ -580,10 +582,11 @@ def processar_tipo(
     # Identifica IDs já existentes na base
     ids_na_base = set(df_total["id"].astype(str))
 
-    # Filtra apenas registros novos (IDs que não estão na base)
+    # Filtra apenas registros novos com ID acima do mínimo definido por tipo
     novos_registros = [
         d for d in dados_site
         if str(d["id"]) not in ids_na_base
+        and int(d["id"]) > tipo["id_minimo"]
     ]
 
     # ================= ADICIONA NOVOS REGISTROS =================

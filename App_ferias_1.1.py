@@ -476,6 +476,7 @@ def processar_tipo(
     novos_registros = [
         d for d in dados_site
         if str(d["id"]) not in ids_na_base
+        and int(d["id"]) > 800
     ]
 
     if novos_registros:

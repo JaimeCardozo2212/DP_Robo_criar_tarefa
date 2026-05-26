@@ -650,7 +650,11 @@ def processar_tipo(driver, tipo, mapa_empresas, main_window, mapa_motivos=None):
 
             logging.info(f"🔎 Lendo linha {linha}: {empregado}")
 
-            # Verifica se é novo ou precisa de motivo
+            # Verifica se é novo ou precisa de motivo (ignora IDs <= 1130)
+            if int(id_) <= 1130:
+                linha += 1
+                continue
+
             eh_novo = str(id_) not in ids_na_base
             precisa_motivo = eh_novo or str(id_) in ids_sem_titulo
 
