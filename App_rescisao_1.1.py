@@ -1,8 +1,6 @@
-# ================= AUTOMAÇÃO DE RESCISÃO =================
-# Script para automatizar a criação de tarefas de cálculo de rescisão no sistema Onvio
-
 # ================= IMPORTAÇÕES =================
 from datetime import datetime  # Para trabalhar com datas e horários atuais
+import re  # Para extrair a data (dd/mm/aaaa) do texto do detalhe
 import time  # Para pausas (time.sleep) - necessário para aguardar carregamento
 import os  # Para acessar variáveis de ambiente e manipular caminhos
 import sys  # Para verificar se está rodando como .exe e controlar saída
@@ -28,16 +26,35 @@ email = os.getenv("EMAIL")  # Email para login no Onvio
 senha = os.getenv("SENHA")  # Senha para login no Onvio
 url = os.getenv("URL_ENTRADA")
 
+# Antecedência (em dias) para criar a tarefa com base na data do aviso prévio.
+# Ex.: se hoje é dia 1 e a antecedência é 6, cria tarefas cujo aviso prévio
+# seja até o dia 7 (inclusive). Datas mais distantes ficam pendentes e são
+# reavaliadas nas próximas execuções.
+DIAS_ANTECEDENCIA = 6
+
 # Configuração do tipo de processamento (cálculo de rescisão)
 TIPOS = [
 {
-    "nome": "calculo de rescisao",  # Nome do tipo de processamento
-    "arquivo": "dados_calculo_de_rescisao.xlsx",  # Arquivo Excel para armazenar dados
-    "grid_id": "gridTerminationCalculationList",  # ID da tabela no site
-    "aba_calculo_rescisao": True,  # Indica que deve acessar aba de cálculo de rescisão
-    "titulo_tarefa": "",  # Título vazio - será definido dinamicamente baseado no motivo
-    "xpath_expandir": '//*[@id="items-per-page-1"]',  # XPATH para expandir itens
-    "usar_motivo": True  # Indica que deve buscar o motivo da rescisão
+    "nome": "aviso previo de rescisao",
+    "arquivo": "dados_aviso_previo_de_rescisao.xlsx",
+    "grid_id": "gridTerminationList",  # ajustar grid_id depois
+    "aba_calculo_rescisao": False,
+    "titulo_tarefa": "",
+    "xpath_expandir": '//*[@id="items-per-page-0"]',  # ajustar xpath depois
+    "xpath_fechar_detalhe": '//*[@id="ngb-nav-0-panel"]/app-termination-prior-notice-list/div[2]/app-generic-detail/div/div/div/div[1]/div[2]/button',
+    "usar_motivo": True,
+    "id_minimo": 970
+},
+{
+    "nome": "calculo de rescisao",
+    "arquivo": "dados_calculo_de_rescisao.xlsx",
+    "grid_id": "gridTerminationCalculationList",
+    "aba_calculo_rescisao": True,
+    "titulo_tarefa": "",  # definido dinamicamente pelo motivo
+    "xpath_expandir": '//*[@id="items-per-page-1"]',
+    "xpath_fechar_detalhe": '//*[@id="ngb-nav-1-panel"]/app-termination-calculation/div[2]/app-generic-detail/div/div/div/div[1]/div[2]/button',
+    "usar_motivo": True,
+    "id_minimo": 1130
 }
 ]
 
@@ -189,11 +206,19 @@ def carregar_base(arquivo):
         if "titulo_tarefa" not in df.columns:
             df["titulo_tarefa"] = ""
 
+        if "data_aviso_previo" not in df.columns:
+            df["data_aviso_previo"] = ""
+
+        if "descricao" not in df.columns:
+            df["descricao"] = ""
+
         # Substitui valores vazios por string vazia
         df["status"] = df["status"].fillna("")
         df["protocolo"] = df["protocolo"].fillna("")
         df["motivo"] = df["motivo"].fillna("")
         df["titulo_tarefa"] = df["titulo_tarefa"].fillna("")
+        df["data_aviso_previo"] = df["data_aviso_previo"].fillna("")
+        df["descricao"] = df["descricao"].fillna("")
 
         return df
 
@@ -202,7 +227,8 @@ def carregar_base(arquivo):
         return pd.DataFrame(
             columns=[
                 "id", "empregado", "apelido", "cliente", "admissao",
-                "motivo", "titulo_tarefa", "status", "protocolo"
+                "motivo", "titulo_tarefa", "data_aviso_previo", "descricao",
+                "status", "protocolo"
             ]
         )
 
@@ -322,9 +348,15 @@ def pegar_dados(driver, grid_id):
     dados = []
     linha = 2  # Começa na linha 2 (linha 1 é cabeçalho)
 
-    WebDriverWait(driver, 15).until(
-        EC.presence_of_element_located((By.ID, grid_id))
-    )
+    # Se a grid não carregar, normalmente significa que não há dados neste mês —
+    # nesse caso retornamos lista vazia e seguimos o fluxo, sem tratar como erro.
+    try:
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.ID, grid_id))
+        )
+    except Exception:
+        logging.info("📭 Nenhum dado encontrado (grid não carregou) — seguindo sem registros")
+        return dados
 
     while True:
         try:
@@ -360,63 +392,195 @@ def pegar_dados(driver, grid_id):
     return dados
 
 # ================= FUNÇÃO PARA BUSCAR MOTIVO DA RESCISÃO =================
-def buscar_motivo_rescisao(driver, linha):
+def extrair_data_aviso_previo(driver):
     """
-    Abre o detalhe do funcionário para extrair o motivo da rescisão.
-    
+    Extrai o texto da data do aviso prévio do detalhe que está aberto.
+
+    O id do painel (ngb-nav-XX-panel) é DINÂMICO e muda a cada carregamento.
+    Por isso usamos o atributo estável `data-qe-id="prior-notice-date"`, que
+    fica diretamente no <span> da data (igual ao motivo usa "terminate-motive").
+    Caímos para um XPATH por rótulo/posição apenas como reserva.
+
+    Returns:
+        str: Texto bruto encontrado (ex.: "29/04/2026") ou "" se não encontrar.
+    """
+    # 1ª opção (mais estável): atributo data-qe-id no próprio span da data.
+    try:
+        for el in driver.find_elements(By.CSS_SELECTOR, '[data-qe-id="prior-notice-date"]'):
+            texto = el.text.strip()
+            if texto:
+                return texto
+    except Exception:
+        pass
+
+    # Reservas: por rótulo "Data do aviso prévio" e por posição no componente.
+    xpaths = [
+        '//span[contains(normalize-space(.), "Data do aviso")]'
+        '/ancestor::div[contains(@class,"row")][1]'
+        '//span[@data-qe-id="prior-notice-date" or position()=1][last()]',
+        '//app-termination-detail-info/div/div[10]/div[2]',
+    ]
+    for xp in xpaths:
+        try:
+            for el in driver.find_elements(By.XPATH, xp):
+                texto = el.text.strip()
+                if texto:
+                    return texto
+        except Exception:
+            continue
+    return ""
+
+
+def extrair_descricao(driver):
+    """
+    Extrai o texto da "Descrição" do detalhe que está aberto.
+
+    Ancoramos no rótulo "Descrição" (classe detail-label) e pegamos o valor da
+    coluna ao lado (span.detail-data). Vai para a observação ao criar a tarefa.
+
+    Returns:
+        str: Texto da descrição ou "" se não encontrar.
+    """
+    xpaths = [
+        # 1ª opção: pelo rótulo exato -> valor na coluna irmã.
+        '//span[contains(@class,"detail-label") and normalize-space(.)="Descrição"]'
+        '/ancestor::div[contains(@class,"col-sm-2")][1]'
+        '/following-sibling::div[1]//span',
+        # Reserva: pelo rótulo -> span de dados na mesma linha.
+        '//span[normalize-space(.)="Descrição"]'
+        '/ancestor::div[contains(@class,"row")][1]'
+        '//span[contains(@class,"detail-data")]',
+    ]
+    for xp in xpaths:
+        try:
+            for el in driver.find_elements(By.XPATH, xp):
+                texto = el.text.strip()
+                if texto:
+                    return texto
+        except Exception:
+            continue
+    return ""
+
+
+def parse_data_aviso(texto):
+    """
+    Procura uma data no formato dd/mm/aaaa dentro do texto e devolve um date.
+
+    Returns:
+        datetime.date ou None se não encontrar/parsear.
+    """
+    if not texto:
+        return None
+    m = re.search(r'(\d{2})/(\d{2})/(\d{4})', str(texto))
+    if not m:
+        return None
+    try:
+        return datetime.strptime(m.group(0), "%d/%m/%Y").date()
+    except ValueError:
+        return None
+
+
+def deve_criar_agora(data_aviso_texto):
+    """
+    Decide se a tarefa deve ser criada hoje com base na data do aviso prévio.
+
+    Regra: cria se o aviso prévio estiver a até DIAS_ANTECEDENCIA dias (ou se já
+    passou). Datas mais distantes ficam pendentes para as próximas execuções.
+    Se a data não puder ser lida, cria mesmo assim (não bloqueia o processo).
+
+    Returns:
+        bool: True para criar a tarefa agora, False para adiar.
+    """
+    data_aviso = parse_data_aviso(data_aviso_texto)
+
+    if data_aviso is None:
+        logging.warning(
+            f"⚠️ Data do aviso prévio ilegível ('{data_aviso_texto}') — "
+            f"criando tarefa mesmo assim"
+        )
+        return True
+
+    hoje = datetime.now().date()
+    dias_restantes = (data_aviso - hoje).days
+    data_fmt = data_aviso.strftime('%d/%m/%Y')
+
+    if dias_restantes <= DIAS_ANTECEDENCIA:
+        logging.info(
+            f"📅 Aviso prévio {data_fmt} (faltam {dias_restantes} dia(s)) — "
+            f"dentro do prazo de {DIAS_ANTECEDENCIA} dias, criar tarefa"
+        )
+        return True
+
+    logging.info(
+        f"📅 Aviso prévio {data_fmt} (faltam {dias_restantes} dia(s)) — "
+        f"fora do prazo de {DIAS_ANTECEDENCIA} dias, adiando criação"
+    )
+    return False
+
+
+def buscar_motivo_rescisao(driver, linha, grid_id, xpath_fechar_detalhe):
+    """
+    Abre o detalhe do funcionário para extrair o motivo da rescisão e a data
+    do aviso prévio.
+
     Args:
         driver: Instância do WebDriver
         linha: Número da linha na tabela
-    
+        grid_id: ID do grid (varia entre aviso previo e calculo)
+        xpath_fechar_detalhe: XPATH do botão para fechar o modal de detalhe
+
     Returns:
-        str: Motivo da rescisão encontrado
+        tuple: (motivo, data_aviso_previo, descricao) — todos str. Podem vir
+               vazios se não forem encontrados no detalhe.
     """
-    # Salva as janelas abertas antes de clicar
     janelas_antes = set(driver.window_handles)
 
-    # Constrói XPATH do botão de detalhe (ícone de olho ou similar)
     xpath_click = (
-        f'//*[@id="gridTerminationCalculationList"]'
+        f'//*[@id="{grid_id}"]'
         f'/div[1]/div[1]/div[1]/div[{linha}]/div[2]/div/span[2]'
     )
 
-    clicar(driver, xpath_click)  # Clica para abrir detalhes
-
+    clicar(driver, xpath_click)
     time.sleep(2)
 
-    # Verifica se abriu uma nova janela
     janelas_depois = set(driver.window_handles)
     nova_janela = janelas_depois - janelas_antes
 
     if nova_janela:
-        # Se abriu nova janela, muda o foco para ela
         driver.switch_to.window(nova_janela.pop())
         logging.info("🪟 Detalhe abriu em nova janela — switch realizado")
 
-    # Aguarda e localiza o elemento que contém o motivo da rescisão
     elemento = WebDriverWait(driver, 15).until(
         EC.presence_of_element_located(
             (By.CSS_SELECTOR, '[data-qe-id="terminate-motive"]')
         )
     )
 
-    motivo = elemento.text.strip()  # Extrai o texto do motivo
+    motivo = elemento.text.strip()
     logging.info(f"📋 Motivo da rescisão: {motivo}")
 
-    # Fecha o modal de detalhes (clica no botão "Voltar" ou "Fechar")
-    clicar(
-        driver,
-        '//*[@id="ngb-nav-1-panel"]/app-termination-calculation/div[2]/app-generic-detail/div/div/div/div[1]/div[2]/button'
-    )
+    # Extrai a data do aviso prévio (id do painel é dinâmico, ver função).
+    data_aviso_previo = extrair_data_aviso_previo(driver)
+    if data_aviso_previo:
+        logging.info(f"📆 Data do aviso prévio: {data_aviso_previo}")
+    else:
+        logging.warning("⚠️ Não foi possível extrair a data do aviso prévio")
 
+    # Extrai a descrição (vai para a observação ao criar a tarefa).
+    descricao = extrair_descricao(driver)
+    if descricao:
+        logging.info(f"📝 Descrição: {descricao}")
+    else:
+        logging.warning("⚠️ Não foi possível extrair a descrição")
+
+    clicar(driver, xpath_fechar_detalhe)
     time.sleep(1)
 
-    # Se abriu nova janela, fecha e volta para a original
     if nova_janela:
-        driver.close()  # Fecha a janela de detalhe
-        driver.switch_to.window(list(janelas_antes)[0])  # Volta para janela principal
+        driver.close()
+        driver.switch_to.window(list(janelas_antes)[0])
 
-    return motivo
+    return motivo, data_aviso_previo, descricao
 
 # ================= FUNÇÕES DE LOGIN E NAVEGAÇÃO =================
 def iniciar_driver():
@@ -424,7 +588,7 @@ def iniciar_driver():
     Inicializa o Chrome WebDriver em modo headless.
     """
     options = Options()
-    options.add_argument("--headless=new")  # Modo sem interface gráfica
+    # options.add_argument("--headless=new")  # Modo sem interface gráfica
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--no-sandbox")
@@ -477,7 +641,7 @@ def navegar_ate_funcionarios(driver):
     driver.execute_script("arguments[0].click();", opcao)  # Clique via JavaScript
 
 # ================= FUNÇÃO DE CRIAÇÃO DE TAREFAS =================
-def criar_tarefa(driver, empregado, apelido_formatado, titulo_tarefa, main_window):
+def criar_tarefa(driver, empregado, apelido_formatado, titulo_tarefa, main_window, observacao=""):
     """
     Cria uma tarefa de rescisão no sistema para um funcionário.
     
@@ -529,15 +693,23 @@ def criar_tarefa(driver, empregado, apelido_formatado, titulo_tarefa, main_windo
     clicar(driver, '//*[@id="gestta-multiselect-dropdown-11"]/div/div/ul/li[4]/a')
     clicar(driver, '//*[@id="gestta-multiselect-dropdown-11-p"]')
 
-    # Confirma seleção do funcionário
+    # Confirma seleção do funcionário (botão "Customizar")
     clicar(driver, '//*[@id="modal-body"]/fieldset/div[5]/div/span')
+
+    # Escreve a descrição no campo de observação (textarea#note), se houver.
+    if observacao:
+        try:
+            escrever_sem_enter(driver, '//*[@id="note"]', observacao)
+            logging.info(f"📝 Observação preenchida: {observacao}")
+        except Exception:
+            logging.warning("⚠️ Não foi possível preencher a observação")
 
     # Define quantidade (100 itens)
     clicar_1(driver, '//*[@id="modal-body"]/fieldset/div[9]/div/div/span')
     clicar(driver, '//*[@id="modal-body"]/fieldset/div[9]/div/div/div/ul/li[2]/span/button[1]')
 
     # Salva a tarefa
-    clicar(driver, '//*[@id="modal-body"]/div/button[2]')
+    # clicar(driver, '//*[@id="modal-body"]/div/button[2]')
 
     logging.info("⏳ Aguardando fechamento do modal...")
 
@@ -602,16 +774,25 @@ def processar_tipo(driver, tipo, mapa_empresas, main_window, mapa_motivos=None):
         )
         clicar(driver, '//*[@id="ngb-nav-1"]')  # Clica na aba de cálculo de rescisão
         time.sleep(2)
+
+    time.sleep(2)
+
+    # Prepara a grid: espera carregar e expande os itens por página.
+    # Se a grid não aparecer, normalmente significa que não há dados neste mês —
+    # nesse caso seguimos o fluxo normalmente, sem tratar como erro.
+    try:
         WebDriverWait(driver, 20).until(
             EC.presence_of_element_located((By.ID, tipo["grid_id"]))
         )
 
-    time.sleep(2)
-    clicar_1(driver, tipo["xpath_expandir"])  # Expande para 100 itens por página
-    time.sleep(1)
-    WebDriverWait(driver, 15).until(
-        EC.presence_of_element_located((By.ID, tipo["grid_id"]))
-    )
+        clicar_1(driver, tipo["xpath_expandir"])  # Expande para 100 itens por página
+        time.sleep(1)
+
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.ID, tipo["grid_id"]))
+        )
+    except Exception:
+        logging.info("📭 Grid não carregou (provavelmente sem dados neste mês) — seguindo sem coletar novos registros")
 
     # ================= CARREGAR DADOS EXISTENTES =================
     df_total = carregar_base(tipo["arquivo"])
@@ -630,9 +811,12 @@ def processar_tipo(driver, tipo, mapa_empresas, main_window, mapa_motivos=None):
     novos_registros = []
     linha = 2
 
-    WebDriverWait(driver, 15).until(
-        EC.presence_of_element_located((By.ID, tipo["grid_id"]))
-    )
+    try:
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.ID, tipo["grid_id"]))
+        )
+    except Exception:
+        logging.info("📭 Nenhum dado encontrado (grid não carregou) — seguindo sem registros")
 
     # Loop para ler todas as linhas da tabela
     while True:
@@ -650,8 +834,8 @@ def processar_tipo(driver, tipo, mapa_empresas, main_window, mapa_motivos=None):
 
             logging.info(f"🔎 Lendo linha {linha}: {empregado}")
 
-            # Verifica se é novo ou precisa de motivo (ignora IDs <= 1130)
-            if int(id_) <= 1130:
+            # Ignora IDs abaixo do mínimo configurado no tipo
+            if int(id_) <= tipo["id_minimo"]:
                 linha += 1
                 continue
 
@@ -660,27 +844,34 @@ def processar_tipo(driver, tipo, mapa_empresas, main_window, mapa_motivos=None):
 
             motivo = ""
             titulo_tarefa = ""
+            data_aviso_previo = ""
+            descricao = ""
 
-            # Busca o motivo se necessário
+            # Busca o motivo (data do aviso prévio e descrição) se necessário
             if precisa_motivo and tipo.get("usar_motivo") and mapa_motivos:
-                motivo = buscar_motivo_rescisao(driver, linha)
+                motivo, data_aviso_previo, descricao = buscar_motivo_rescisao(
+                    driver, linha, tipo["grid_id"], tipo["xpath_fechar_detalhe"]
+                )
                 titulo_tarefa = mapa_motivos.get(motivo.lower(), "DP - RESCISAO")
-                
+
                 if mapa_motivos.get(motivo.lower()) is None:
                     logging.warning(f"⚠️ Motivo não encontrado no mapeamento: '{motivo}' — usando título padrão: DP - RESCISAO")
 
-                # Atualiza registro existente com motivo e título
+                # Atualiza registro existente com motivo, título, data e descrição
                 if not eh_novo:
                     mask = df_total["id"].astype(str) == str(id_)
                     df_total.loc[mask, "motivo"] = motivo
                     df_total.loc[mask, "titulo_tarefa"] = titulo_tarefa
+                    df_total.loc[mask, "data_aviso_previo"] = data_aviso_previo
+                    df_total.loc[mask, "descricao"] = descricao
 
             # Adiciona novo registro se necessário
             if eh_novo:
                 novos_registros.append({
                     "id": id_, "empregado": empregado, "apelido": apelido,
                     "cliente": cliente, "admissao": admissao, "motivo": motivo,
-                    "titulo_tarefa": titulo_tarefa, "status": "", "protocolo": ""
+                    "titulo_tarefa": titulo_tarefa, "data_aviso_previo": data_aviso_previo,
+                    "descricao": descricao, "status": "", "protocolo": ""
                 })
 
             linha += 1
@@ -723,11 +914,20 @@ def processar_tipo(driver, tipo, mapa_empresas, main_window, mapa_motivos=None):
                     logging.warning(f"⚠️ Título vazio para {registro['empregado']}, pulando...")
                     continue
 
+                # Regra do aviso prévio: só cria se estiver dentro do prazo de
+                # DIAS_ANTECEDENCIA dias. Caso contrário, deixa pendente para ser
+                # reavaliado nas próximas execuções.
+                data_aviso_txt = str(registro.get("data_aviso_previo") or "")
+                if not deve_criar_agora(data_aviso_txt):
+                    logging.info(f"⏭️ Adiando {registro['empregado']} — aviso prévio fora do prazo")
+                    continue
+
                 logging.info(f"🛠️ Criando tarefa para {registro['empregado']} | Título: {titulo}")
 
                 # Cria a tarefa
                 numero_tarefa = criar_tarefa(
-                    driver, registro["empregado"], apelido_formatado, titulo, main_window
+                    driver, registro["empregado"], apelido_formatado, titulo, main_window,
+                    str(registro.get("descricao") or "")
                 )
 
                 # Atualiza status e protocolo
@@ -785,28 +985,57 @@ MAX_TENTATIVAS = 3  # Número máximo de tentativas
 
 def main():
     """
-    Função principal com sistema de tentativas.
-    Tenta executar até MAX_TENTATIVAS vezes em caso de falha.
-    Se todas falharem, envia email de alerta.
+    Função principal do programa.
+    Tenta executar a automação até 3 vezes em caso de falha.
+    Se todas falharem, envia email de alerta e encerra.
     """
+    # Configura o sistema de logs
     configurar_log()
 
     tentativa = 0
 
+    # Loop de tentativas
     while tentativa < MAX_TENTATIVAS:
         tentativa += 1
+
         logging.info(f"🚀 Tentativa {tentativa}/{MAX_TENTATIVAS} — Iniciando automação unificada")
 
         try:
+            # Executa a automação
             rodar_automacao()
+
             logging.info("✅ Automação finalizada com sucesso")
-            return  # Sai se tudo deu certo
+            return  # Sai da função se tudo deu certo
 
         except Exception:
             logging.exception(f"❌ Falha na tentativa {tentativa}/{MAX_TENTATIVAS}")
 
+            # Se ainda tem tentativas restantes, aguarda antes de tentar novamente
             if tentativa < MAX_TENTATIVAS:
                 logging.info("🔁 Aguardando 10 segundos antes de nova tentativa...")
                 time.sleep(10)
 
-    # ================= ESGOTOU AS
+    # ================= ESGOTOU TENTATIVAS =================
+    # Prepara mensagem de erro para email
+    mensagem = (
+        f"O aplicativo de calculo de rescisao tentou executar {MAX_TENTATIVAS} vezes "
+        f"e o erro persistiu em todas as tentativas.\n\n"
+        f"Data/Hora: {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}\n\n"
+        f"Verifique o arquivo de log para mais detalhes."
+    )
+
+    logging.critical(f"🚨 {MAX_TENTATIVAS} tentativas esgotadas. Encerrando aplicativo.")
+
+    # Envia email de alerta
+    enviar_email_erro(
+        f"🚨 FALHA CRÍTICA — Automação Admissão encerrada após {MAX_TENTATIVAS} tentativas",
+        mensagem
+    )
+
+    # Encerra o programa com código de erro
+    sys.exit(1)
+
+# ================= PONTO DE ENTRADA =================
+# Verifica se o script está sendo executado diretamente (não importado)
+if __name__ == "__main__":
+    main()

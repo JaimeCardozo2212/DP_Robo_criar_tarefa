@@ -295,10 +295,16 @@ def pegar_dados(driver, grid_id):
     dados = []
     linha = 2  # Começa na linha 2 (linha 1 é o cabeçalho)
 
-    # Aguarda a tabela carregar
-    WebDriverWait(driver, 15).until(
-        EC.presence_of_element_located((By.ID, grid_id))
-    )
+    # Aguarda a tabela carregar. Se não aparecer, normalmente significa que não
+    # há dados neste mês — nesse caso retornamos lista vazia e seguimos o fluxo
+    # normalmente, sem tratar como erro.
+    try:
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.ID, grid_id))
+        )
+    except Exception:
+        logging.info("📭 Nenhum dado encontrado (grid não carregou) — seguindo sem registros")
+        return dados
 
     while True:
         try:
@@ -549,28 +555,25 @@ def processar_tipo(
         clicar(driver, '//*[@id="ngb-nav-2"]')
         time.sleep(4)
 
-        # Espera a grid de estagiários carregar
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.ID, tipo["grid_id"]))
-        )
-
-    else:
-        # Se for empregado, espera a grid de empregados carregar
-        WebDriverWait(driver, 20).until(
-            EC.presence_of_element_located((By.ID, tipo["grid_id"]))
-        )
-
     time.sleep(2)
 
-    # Expande para mostrar mais itens por página
-    clicar_1(driver, tipo["xpath_expandir"])
+    # Prepara a grid: espera carregar e expande os itens por página.
+    # Se a grid não aparecer, normalmente significa que não há dados neste mês —
+    # nesse caso seguimos o fluxo normalmente, sem tratar como erro.
+    try:
+        WebDriverWait(driver, 20).until(
+            EC.presence_of_element_located((By.ID, tipo["grid_id"]))
+        )
 
-    time.sleep(1)
+        # Expande para mostrar mais itens por página
+        clicar_1(driver, tipo["xpath_expandir"])
+        time.sleep(1)
 
-    # Aguarda a grid estar presente
-    WebDriverWait(driver, 15).until(
-        EC.presence_of_element_located((By.ID, tipo["grid_id"]))
-    )
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.ID, tipo["grid_id"]))
+        )
+    except Exception:
+        logging.info("📭 Grid não carregou (provavelmente sem dados neste mês) — seguindo sem coletar novos registros")
 
     # ================= COLETA DE DADOS =================
     logging.info("📊 Coletando dados do site...")
